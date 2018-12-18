@@ -9,6 +9,7 @@ import(
 	"encoding/json"
 	"sync"
 	"errors"
+	"bytes"
 
 	"github.com/gocraft/web"
 	_ "github.com/lib/pq"
@@ -25,8 +26,8 @@ type Docs struct {
 }
 
 type ReplyError struct {
-	code	int	`json:"code"`
-	text	string	`json:"text"`
+	Code	int	`json:"code"`
+	Text	string	`json:"text"`
 }
 
 type Response struct {
@@ -94,11 +95,46 @@ func main() {
 	router.Get("/", (*Context).RootRoute)
 	router.Get("/docs", (*Context).GetDocsRoute)
 	router.Get("/docs/:id", (*Context).GetDocByIdRoute)
+	router.Post("/docs", (*Context).PostDocRoute)
 	http.ListenAndServe("localhost:8000", router)
 }
 
 func (c *Context) RootRoute(rw web.ResponseWriter, req *web.Request){
 	fmt.Fprint(rw, "Hi there")
+}
+
+func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
+	//TODO(Alidar): Check for max value
+	err := req.ParseMultipartForm(0)
+	if (err != nil) {
+		log.Println("[ERR] POST /docs while parsing form: ", err)
+		return
+	}
+
+	file, fileHeader, err := req.FormFile("newdoc")
+	if (err != nil) {
+		log.Println("[ERR] POST /docs while parsing file: ", err)
+		return
+	}
+	defer file.Close()
+
+	var content = make([]byte, 1048576) //1MiB
+	_, err = file.Read(content)
+	if (err != nil) {
+		log.Println("[ERR] POST /docs while reading file: ", err)
+		return
+	}
+
+	content = bytes.Trim(content, "\x00")
+	_, err = db.Exec("INSERT INTO docs (name, content) VALUES ($1, $2);", fileHeader.Filename, string(content))
+	if (err != nil) {
+		log.Println("[ERR] POST /docs while inserting into db: ", err)
+		return
+	}
+
+	SetCacheIrrelevant()
+	rw.WriteHeader(http.StatusCreated)
+	rw.Write([]byte("{\"file\":\"" + fileHeader.Filename + "\""))
 }
 
 func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
@@ -139,6 +175,7 @@ func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
 			SetCacheIrrelevant()
 			return
 		}
+		rw.WriteHeader(http.StatusOK)
 		rw.Write([]byte(marshaledCache))
 	} else{
 		var result *sql.Rows
@@ -188,6 +225,7 @@ func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
 			SetCacheIrrelevant()
 			return
 		}
+		rw.WriteHeader(http.StatusOK)
 		rw.Write(response)
 	}
 
@@ -204,7 +242,7 @@ func (c *Context) GetDocByIdRoute(rw web.ResponseWriter, req *web.Request){
 			SetCacheIrrelevant()
 			return
 		}
-		fmt.Println("11")
+		rw.WriteHeader(http.StatusOK)
 		rw.Write([]byte(marshaledCache))
 	} else {
 		//TOFIGUREOUT(Alidar): Should I retrieve ALL data from db in order to update cache??
@@ -234,6 +272,7 @@ func (c *Context) GetDocByIdRoute(rw web.ResponseWriter, req *web.Request){
 			return
 		}
 
+		rw.WriteHeader(http.StatusOK)
 		rw.Write(response)
 
 	}
