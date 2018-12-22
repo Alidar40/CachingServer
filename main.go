@@ -125,6 +125,43 @@ func (c *Context) Reply(rw web.ResponseWriter, req *web.Request, model *ReplyMod
 	rw.Write(reply)
 }
 
+func (c *Context) AuthCheck(rw web.ResponseWriter, req *web.Request, next web.NextMiddlewareFunc){
+	var lastActivityTime time.Time
+
+	token, err := req.Cookie("token")
+	if (err != nil) {
+		if (err == http.ErrNoCookie){
+			c.Error = errors.Wrap(err, "signing in without cookie")
+			rw.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		c.Error = errors.Wrap(err, "parsing token")
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	err = db.QueryRow(`SELECT lastactivitytime FROM sessions WHERE token = $1;`, token.Value).Scan(&lastActivityTime)
+	if (err != nil) {
+		if (err == sql.ErrNoRows){
+			c.Error = errors.Wrap(err, "trying to sign in with bad token")
+			rw.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		c.Error = errors.Wrap(err, "searching for appropriate token in db")
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	_, err = db.Exec(`UPDATE sessions SET lastactivitytime = now() where token = $1;`, token.Value)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "updating session token")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	next(rw, req)
+}
+
 var(
 	db	*sql.DB
 	cache = make(map[string]Doc)
@@ -230,7 +267,7 @@ func main() {
 		Middleware((*Context).Log).
 		Middleware((*Context).HandleError)
 	router.Get("/", (*Context).RootRoute)
-	router.Get("/docs", (*Context).GetDocsRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/docs", (*Context).GetDocsRoute)
 	router.Get("/docs/:id", (*Context).GetDocByIdRoute)
 	router.Post("/docs", (*Context).PostDocRoute)
 	router.Post("/register", (*Context).PostRegisterRoute)
@@ -510,6 +547,9 @@ func (c *Context) PostAuthRoute(rw web.ResponseWriter, req *web.Request){
 			Token: tokenRaw.String(),
 		},
 	}
+
+	http.SetCookie(rw, &http.Cookie{Name: "token", Value: tokenRaw.String(), Path: "/"})
+	rw.Header().Set("Location", "/docs")
 	rw.WriteHeader(http.StatusOK)
 	c.Reply(rw, req, reply)
 }
