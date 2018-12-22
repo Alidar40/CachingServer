@@ -18,6 +18,7 @@ import(
 	_ "github.com/lib/pq"
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
+	"github.com/satori/go.uuid"
 )
 
 type Doc struct {
@@ -233,6 +234,7 @@ func main() {
 	router.Get("/docs/:id", (*Context).GetDocByIdRoute)
 	router.Post("/docs", (*Context).PostDocRoute)
 	router.Post("/register", (*Context).PostRegisterRoute)
+	router.Post("/auth", (*Context).PostAuthRoute)
 	http.ListenAndServe("localhost:8000", router)
 }
 
@@ -458,5 +460,56 @@ func (c *Context) PostRegisterRoute(rw web.ResponseWriter, req *web.Request){
 		},
 	}
 	rw.WriteHeader(http.StatusCreated)
+	c.Reply(rw, req, reply)
+}
+
+func (c *Context) PostAuthRoute(rw web.ResponseWriter, req *web.Request){
+	var authForm	RegisterForm
+	var login	string
+	var password	string
+
+	decoder := json.NewDecoder(req.Body)
+	err := decoder.Decode(&authForm)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing auth form")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	pswdHash := sha256.Sum256([]byte(authForm.Password))
+	pswdHashStr := hex.EncodeToString(pswdHash[:])
+
+	err = db.QueryRow(`SELECT login, password FROM users WHERE login = $1 and password = $2;`, authForm.Login, pswdHashStr).Scan(&login, &password)
+	if (err != nil) {
+		if (err == sql.ErrNoRows) {
+			c.Error = errors.Wrap(err, "authenticating with wrong credentials")
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		c.Error = errors.Wrap(err, "querying users")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	tokenRaw, err := uuid.NewV4()
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "generating token")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	_, err = db.Exec(`INSERT INTO sessions (login, token) VALUES($1, $2)`, authForm.Login, tokenRaw.String())
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "creating session for user " + authForm.Login)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	reply := &ReplyModel{
+		Res: &Response{
+			Token: tokenRaw.String(),
+		},
+	}
+	rw.WriteHeader(http.StatusOK)
 	c.Reply(rw, req, reply)
 }
