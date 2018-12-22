@@ -5,6 +5,8 @@ import(
 	"net/http"
 	"strconv"
 	"database/sql"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"sync"
 	"io/ioutil"
@@ -37,13 +39,19 @@ type ReplyError struct {
 }
 
 type Response struct {
-	//TODO(Alidar) Fill this
+	Login	string	`json:"login,omitempty"`
+	Token	string	`json:"token,omitempty"`
 }
 
 type ReplyModel struct {
 	Err	*ReplyError	`json:"error,omitempty"`
 	Res	*Response	`json:"responce,omitempty"`
 	Data	*Docs		`json:"data,omitempty"`
+}
+
+type RegisterForm struct {
+	Login		string	`json:"login"`
+	Password	string	`json:"pswd"`
 }
 
 type Context struct {
@@ -151,6 +159,59 @@ func ReadFromCache(key string) (Doc, error){
 	return data, nil
 }
 
+func VerifyRegisterParameters(parameter string, isPswd bool) (error){
+	var err		error
+	var i		int
+	var isLetter	bool
+	var isDigit	bool
+
+	var containsDigit	bool
+	var containsLetter	bool
+
+
+	if (len(parameter) < 8 || len(parameter) > 32){
+		err = errors.New("parameter is either too short, or too long")
+		return err
+	}
+
+	for i = 0; i < len(parameter); i++ {
+		isLetter = false
+		isDigit = false
+
+		symbol, err := strconv.Atoi(fmt.Sprintf("%d", parameter[i]))
+		if (err != nil) {
+			return err
+		}
+
+		/*ASCII:-------A---------------Z-----------------a---------------z*/
+		if ((symbol >= 65 && symbol <= 90) || (symbol >= 97 && symbol <= 122)) {
+			isLetter = true
+			if (isPswd) {
+				containsLetter = true
+			}
+		}
+
+		/*ASCII:------0---------------9*/
+		if (symbol >= 48 && symbol <= 57) {
+			isDigit = true
+			if (isPswd) {
+				containsDigit = true
+			}
+		}
+
+		if (isDigit == false && isLetter == false) {
+			err = errors.New("one of characters is niether a letter, nor a digit")
+			return err
+		}
+	}
+
+	if (isPswd == true && (containsLetter == false || containsDigit == false)){
+		err = errors.New("password must contain at least one digit and one letter")
+		return err
+	}
+	return nil
+}
+
 func main() {
 	flag.Set("logtostderr", "true")
 	flag.Set("v", "2")
@@ -171,6 +232,7 @@ func main() {
 	router.Get("/docs", (*Context).GetDocsRoute)
 	router.Get("/docs/:id", (*Context).GetDocByIdRoute)
 	router.Post("/docs", (*Context).PostDocRoute)
+	router.Post("/register", (*Context).PostRegisterRoute)
 	http.ListenAndServe("localhost:8000", router)
 }
 
@@ -354,4 +416,47 @@ func (c *Context) GetDocByIdRoute(rw web.ResponseWriter, req *web.Request){
 		rw.Header().Set("Content-Type", doc.Mime)
 		http.ServeFile(rw, req.Request, "./UserFiles/" + doc.Name)
 	}
+}
+
+func (c *Context) PostRegisterRoute(rw web.ResponseWriter, req *web.Request){
+	var regForm	RegisterForm
+
+	decoder := json.NewDecoder(req.Body)
+	err := decoder.Decode(&regForm)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing register form")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = VerifyRegisterParameters(regForm.Login, false)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "registering with bad login")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = VerifyRegisterParameters(regForm.Password, true)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "registering with bad password")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	pswdHash := sha256.Sum256([]byte(regForm.Password))
+	pswdHashStr := hex.EncodeToString(pswdHash[:])
+	_, err = db.Exec(`INSERT INTO users (login, password) VALUES ($1, $2)`, regForm.Login, pswdHashStr)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "creating new user")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	reply := &ReplyModel{
+		Res: &Response{
+			Login: regForm.Login,
+		},
+	}
+	rw.WriteHeader(http.StatusCreated)
+	c.Reply(rw, req, reply)
 }
