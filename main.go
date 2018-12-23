@@ -48,7 +48,7 @@ type Response struct {
 
 type ReplyModel struct {
 	Err	*ReplyError	`json:"error,omitempty"`
-	Res	*Response	`json:"responce,omitempty"`
+	Res	*Response	`json:"response,omitempty"`
 	Data	*Docs		`json:"data,omitempty"`
 }
 
@@ -315,6 +315,8 @@ func main() {
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/auth", (*Context).DeleteAuthRoute)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/grant", (*Context).GrantPermissionsRoute)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/grant", (*Context).CancelPermissionsRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/grant/public/:id", (*Context).SetDocPublic)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/grant/private/:id", (*Context).SetDocPrivate)
 	router.Post("/register", (*Context).PostRegisterRoute)
 	router.Post("/auth", (*Context).PostAuthRoute)
 	http.ListenAndServe("localhost:8000", router)
@@ -949,4 +951,110 @@ func (c *Context) CancelPermissionsRoute(rw web.ResponseWriter, req *web.Request
 	}
 	rw.WriteHeader(http.StatusOK)
 	c.Reply(rw, req, reply)
+}
+
+func (c *Context) SetDocPublic(rw web.ResponseWriter, req *web.Request){
+	var author string
+
+	userLogin, err := req.Cookie("login")
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing login")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	docId := req.PathParams["id"]
+
+	err = db.QueryRow(`
+			SELECT author
+			FROM docs
+			WHERE id = $1`, docId).
+		Scan(&author)
+	if (err != nil) {
+		if (err == sql.ErrNoRows){
+			c.Error = errors.Wrap(err, "trying to set file public using bad docId")
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		c.Error = errors.Wrap(err, "trying to retrieve author")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if (author != userLogin.Value) {
+		err = errors.New("only author can set file public")
+		c.Error = errors.Wrap(err, "trying to set someone's else file public")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	_, err = db.Exec(`UPDATE docs SET public = true WHERE id = $1`, docId)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "setting file public")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	SetCacheIrrelevant()
+	reply := &ReplyModel{
+		Res: &Response{
+			Token: "OK",
+		},
+	}
+	rw.WriteHeader(http.StatusOK)
+	c.Reply(rw, req, reply)
+
+}
+
+func (c *Context) SetDocPrivate(rw web.ResponseWriter, req *web.Request){
+	var author string
+
+	userLogin, err := req.Cookie("login")
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing login")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	docId := req.PathParams["id"]
+
+	err = db.QueryRow(`
+			SELECT author
+			FROM docs
+			WHERE id = $1`, docId).
+		Scan(&author)
+	if (err != nil) {
+		if (err == sql.ErrNoRows){
+			c.Error = errors.Wrap(err, "trying to set file private using bad docId")
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		c.Error = errors.Wrap(err, "trying to retrieve author")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if (author != userLogin.Value) {
+		err = errors.New("only author can set file private")
+		c.Error = errors.Wrap(err, "trying to set someone's else file private")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	_, err = db.Exec(`UPDATE docs SET public = false WHERE id = $1`, docId)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "setting file private")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	SetCacheIrrelevant()
+	reply := &ReplyModel{
+		Res: &Response{
+			Token: "OK",
+		},
+	}
+	rw.WriteHeader(http.StatusOK)
+	c.Reply(rw, req, reply)
+
 }
