@@ -311,7 +311,8 @@ func main() {
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/docs", (*Context).GetDocsRoute)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/docs/:id", (*Context).GetDocByIdRoute)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/docs", (*Context).PostDocRoute)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/auth/", (*Context).DeleteAuthRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/docs/:id", (*Context).DeleteDocRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/auth", (*Context).DeleteAuthRoute)
 	router.Post("/register", (*Context).PostRegisterRoute)
 	router.Post("/auth", (*Context).PostAuthRoute)
 	http.ListenAndServe("localhost:8000", router)
@@ -474,6 +475,7 @@ func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
 		docs := new(Docs)
 		docPrev := new(Doc)
 		docNew := new(Doc)
+		var fileRemains bool
 		var login string
 		for result.Next(){
 			docPrev = docNew
@@ -486,8 +488,15 @@ func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
 				return
 			}
 
-			if (docNew.Id == docPrev.Id || docPrev.Id == "") {
+			if (docPrev.Id == "") {
+				docNew.Grant = append(docNew.Grant, login)
+				fileRemains = true
+				continue
+			}
+
+			if (docNew.Id == docPrev.Id) {
 				docNew.Grant = append(docPrev.Grant, login)
+				fileRemains = true
 				continue
 			}
 
@@ -497,22 +506,27 @@ func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
 				if (docNew.Public == true) {
 					docs.DocsList = append(docs.DocsList, docNew)
 					WriteToCache(docNew.Id, *docNew)
+					docNew = new(Doc)
+					fileRemains = false
 					continue
 				}
 				docNew.Grant = append(docNew.Grant, login)
+				fileRemains = true
 				continue
 			}
 
 			if (docNew.Public == true) {
 				docs.DocsList = append(docs.DocsList, docNew)
 				WriteToCache(docNew.Id, *docNew)
+				docNew = new(Doc)
+				fileRemains = false
 				continue
 			}
 
 
 		}
 
-		if (docNew.Id == docPrev.Id) {
+		if (fileRemains == true) {
 			docs.DocsList = append(docs.DocsList, docNew)
 			WriteToCache(docNew.Id, *docNew)
 		}
@@ -621,6 +635,71 @@ func (c *Context) GetDocByIdRoute(rw web.ResponseWriter, req *web.Request){
 	return
 }
 
+func (c *Context) DeleteDocRoute(rw web.ResponseWriter, req *web.Request){
+	userLogin, err := req.Cookie("login")
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing login")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	docId := req.PathParams["id"]
+
+	_, ok := cache[docId]
+	if (ok) {
+		delete(cache, docId)
+	}
+
+	var doc = new(Doc)
+	err = db.QueryRow(`
+			SELECT name, author
+			FROM docs
+			WHERE id = $1`, docId).Scan(&doc.Name, &doc.Author)
+	if (err != nil) {
+		if (err == sql.ErrNoRows) {
+			c.Error = errors.Wrap(err, "trying to delet file using bad id")
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		c.Error = errors.Wrap(err, "querying db")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if (doc.Author == userLogin.Value) {
+		_, err = db.Exec(`
+			DELETE
+			FROM docs
+			WHERE id = $1`, docId)
+		if (err != nil) {
+			c.Error = errors.Wrap(err, "deleting file from docs table")
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		_, err = os.Stat("./UserFiles/" + userLogin.Value + "/" + doc.Name)
+		if (os.IsNotExist(err)) {
+			err = errors.New("there is no such a file")
+			c.Error = errors.Wrap(err, "trying to delete file, which doesn't exist")
+			rw.WriteHeader(http.StatusBadRequest)
+		} else {
+			err = os.Remove("./UserFiles/" + userLogin.Value + "/" + doc.Name)
+			if (err != nil) {
+				c.Error = errors.Wrap(err, "deleting file ./UserFiles/" + userLogin.Value + "/" + doc.Name)
+				rw.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			rw.WriteHeader(http.StatusOK)
+			return
+		}
+	} else {
+		err = errors.New("file may be deleted only by author")
+		c.Error = errors.Wrap(err, "deleting someone's else file")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+}
 func (c *Context) PostRegisterRoute(rw web.ResponseWriter, req *web.Request){
 	var regForm	RegisterForm
 
