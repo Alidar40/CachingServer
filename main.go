@@ -250,6 +250,14 @@ func VerifyRegisterParameters(parameter string, isPswd bool) (error){
 	return nil
 }
 
+func ClearSessions() (error) {
+	_, err := db.Exec(`DELETE FROM sessions WHERE lastactivitytime < current_timestamp - interval '1 hour';`)
+	if (err != nil) {
+		return err
+	}
+	return nil
+}
+
 func main() {
 	flag.Set("logtostderr", "true")
 	flag.Set("v", "2")
@@ -263,13 +271,25 @@ func main() {
 	}
 	defer db.Close()
 
+	ticker := time.NewTicker(30 * time.Minute)
+	go func() {
+		for _ = range ticker.C {
+			err := ClearSessions()
+			if (err != nil) {
+				glog.Infof("[ERROR] in main(!) while clearing sessions: ", err)
+				return
+			}
+		}
+	}()
+
 	router := web.New(Context{}).
 		Middleware((*Context).Log).
 		Middleware((*Context).HandleError)
 	router.Get("/", (*Context).RootRoute)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/docs", (*Context).GetDocsRoute)
-	router.Get("/docs/:id", (*Context).GetDocByIdRoute)
-	router.Post("/docs", (*Context).PostDocRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/docs/:id", (*Context).GetDocByIdRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/docs", (*Context).PostDocRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/auth/", (*Context).DeleteAuthRoute)
 	router.Post("/register", (*Context).PostRegisterRoute)
 	router.Post("/auth", (*Context).PostAuthRoute)
 	http.ListenAndServe("localhost:8000", router)
@@ -550,6 +570,43 @@ func (c *Context) PostAuthRoute(rw web.ResponseWriter, req *web.Request){
 
 	http.SetCookie(rw, &http.Cookie{Name: "token", Value: tokenRaw.String(), Path: "/"})
 	rw.Header().Set("Location", "/docs")
+	rw.WriteHeader(http.StatusOK)
+	c.Reply(rw, req, reply)
+}
+
+func (c *Context) DeleteAuthRoute(rw web.ResponseWriter, req *web.Request){
+	token, err := req.Cookie("token")
+	if (err != nil) {
+		if (err == http.ErrNoCookie){
+			c.Error = errors.Wrap(err, "logging out without token")
+			rw.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		c.Error = errors.Wrap(err, "parsing token")
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	_, err = db.Exec(`DELETE FROM sessions WHERE token = $1;`, token.Value)
+	if (err != nil) {
+		if (err == sql.ErrNoRows) {
+			c.Error = errors.Wrap(err, "logging out with unknown token")
+			rw.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		c.Error = errors.Wrap(err, "deleting from session table")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	reply := &ReplyModel{
+		Res: &Response{
+			Token: "DELETED",
+		},
+	}
+
+	http.SetCookie(rw, &http.Cookie{Name: "token", Value: "", Path: "/"})
+	rw.Header().Set("Location", "auth/")
 	rw.WriteHeader(http.StatusOK)
 	c.Reply(rw, req, reply)
 }
