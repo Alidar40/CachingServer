@@ -313,6 +313,8 @@ func main() {
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/docs", (*Context).PostDocRoute)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/docs/:id", (*Context).DeleteDocRoute)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/auth", (*Context).DeleteAuthRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/grant", (*Context).GrantPermissionsRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/grant", (*Context).CancelPermissionsRoute)
 	router.Post("/register", (*Context).PostRegisterRoute)
 	router.Post("/auth", (*Context).PostAuthRoute)
 	http.ListenAndServe("localhost:8000", router)
@@ -839,6 +841,112 @@ func (c *Context) DeleteAuthRoute(rw web.ResponseWriter, req *web.Request){
 
 	http.SetCookie(rw, &http.Cookie{Name: "token", Value: "", Path: "/"})
 	rw.Header().Set("Location", "auth/")
+	rw.WriteHeader(http.StatusOK)
+	c.Reply(rw, req, reply)
+}
+
+func (c *Context) GrantPermissionsRoute(rw web.ResponseWriter, req *web.Request){
+	var author string
+
+	userLogin, err := req.Cookie("login")
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing login")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	login := req.URL.Query().Get("login")
+	docId := req.URL.Query().Get("docid")
+
+	err = db.QueryRow(`
+			SELECT author
+			FROM docs
+			WHERE id = $1`, docId).
+		Scan(&author)
+	if (err != nil) {
+		if (err == sql.ErrNoRows){
+			c.Error = errors.Wrap(err, "trying to grant using bad docId")
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		c.Error = errors.Wrap(err, "trying to retrieve author")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if (author != userLogin.Value) {
+		err = errors.New("only author can give permissions")
+		c.Error = errors.Wrap(err, "trying to grant permissions to someone's else file")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	_, err = db.Exec(`INSERT INTO permits (docid, login) VALUES ($1, $2)`, docId, login)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "granting rights")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	SetCacheIrrelevant()
+	reply := &ReplyModel{
+		Res: &Response{
+			Login: login,
+		},
+	}
+	rw.WriteHeader(http.StatusOK)
+	c.Reply(rw, req, reply)
+}
+
+func (c *Context) CancelPermissionsRoute(rw web.ResponseWriter, req *web.Request){
+	var author string
+
+	userLogin, err := req.Cookie("login")
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing login")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	login := req.URL.Query().Get("login")
+	docId := req.URL.Query().Get("docid")
+
+	err = db.QueryRow(`
+			SELECT author
+			FROM docs
+			WHERE id = $1`, docId).
+		Scan(&author)
+	if (err != nil) {
+		if (err == sql.ErrNoRows){
+			c.Error = errors.Wrap(err, "trying to cancel permissions using bad docId")
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		c.Error = errors.Wrap(err, "trying to retrieve author")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if (author != userLogin.Value) {
+		err = errors.New("only author can cancel permissions")
+		c.Error = errors.Wrap(err, "trying to cancel permissions to someone's else file")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	_, err = db.Exec(`DELETE FROM permits WHERE docid = $1 and login = $2`, docId, login)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "canceling permissions")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	SetCacheIrrelevant()
+	reply := &ReplyModel{
+		Res: &Response{
+			Login: login,
+		},
+	}
 	rw.WriteHeader(http.StatusOK)
 	c.Reply(rw, req, reply)
 }
