@@ -44,6 +44,7 @@ type ReplyError struct {
 type Response struct {
 	Login	string	`json:"login,omitempty"`
 	Token	string	`json:"token,omitempty"`
+	Users	[]string `json:"users,omitempty"`
 }
 
 type ReplyModel struct {
@@ -317,6 +318,7 @@ func main() {
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/grant", (*Context).CancelPermissionsRoute)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/grant/public/:id", (*Context).SetDocPublic)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/grant/private/:id", (*Context).SetDocPrivate)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/users", (*Context).GetUsersListRoute)
 	router.Post("/register", (*Context).PostRegisterRoute)
 	router.Post("/auth", (*Context).PostAuthRoute)
 	http.ListenAndServe("localhost:8000", router)
@@ -1056,5 +1058,47 @@ func (c *Context) SetDocPrivate(rw web.ResponseWriter, req *web.Request){
 	}
 	rw.WriteHeader(http.StatusOK)
 	c.Reply(rw, req, reply)
+
+}
+
+func (c *Context) GetUsersListRoute(rw web.ResponseWriter, req *web.Request){
+	userLogin, err := req.Cookie("login")
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing login")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	result, err := db.Query(`SELECT login FROM users`)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "getting list of users")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer result.Close()
+
+	var users []string
+	var user string
+	for result.Next(){
+		err = result.Scan(&user)
+		if (err != nil) {
+			c.Error = errors.Wrap(err, "parsing result")
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		if (userLogin.Value != user) {
+			users = append(users, user)
+		}
+	}
+
+	reply := &ReplyModel{
+		Res: &Response{
+			Users: users,
+		},
+	}
+	rw.WriteHeader(http.StatusOK)
+	c.Reply(rw, req, reply)
+
 
 }
