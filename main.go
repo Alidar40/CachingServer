@@ -27,6 +27,8 @@ type Doc struct {
 	Mime	string	`json:"mime"`
 	Public	bool	`json:"public"`
 	Created	string	`json:"created"`
+	Author	string	`json:"author"`
+	Grant	[]string `json:"grant"`
 }
 
 type Docs struct {
@@ -127,6 +129,7 @@ func (c *Context) Reply(rw web.ResponseWriter, req *web.Request, model *ReplyMod
 
 func (c *Context) AuthCheck(rw web.ResponseWriter, req *web.Request, next web.NextMiddlewareFunc){
 	var lastActivityTime time.Time
+	var login string
 
 	token, err := req.Cookie("token")
 	if (err != nil) {
@@ -140,7 +143,7 @@ func (c *Context) AuthCheck(rw web.ResponseWriter, req *web.Request, next web.Ne
 		return
 	}
 
-	err = db.QueryRow(`SELECT lastactivitytime FROM sessions WHERE token = $1;`, token.Value).Scan(&lastActivityTime)
+	err = db.QueryRow(`SELECT lastactivitytime, login FROM sessions WHERE token = $1;`, token.Value).Scan(&lastActivityTime, &login)
 	if (err != nil) {
 		if (err == sql.ErrNoRows){
 			c.Error = errors.Wrap(err, "trying to sign in with bad token")
@@ -148,6 +151,25 @@ func (c *Context) AuthCheck(rw web.ResponseWriter, req *web.Request, next web.Ne
 			return
 		}
 		c.Error = errors.Wrap(err, "searching for appropriate token in db")
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	loginFromCookie, err := req.Cookie("login")
+	if (err != nil) {
+		if (err == http.ErrNoCookie){
+			c.Error = errors.Wrap(err, "signing in without login")
+			rw.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		c.Error = errors.Wrap(err, "parsing ligin")
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	if (loginFromCookie.Value != login) {
+		err = errors.New("bad login")
+		c.Error = errors.Wrap(err, "signing in with bad login")
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -300,7 +322,14 @@ func (c *Context) RootRoute(rw web.ResponseWriter, req *web.Request){
 }
 
 func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
-	err := req.ParseMultipartForm(16777216) //16 MiB
+	userLogin, err := req.Cookie("login")
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing login")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	err = req.ParseMultipartForm(16777216) //16 MiB
 	if (err != nil) {
 		c.Error = errors.Wrap(err, "parsing form")
 		rw.WriteHeader(http.StatusBadRequest)
@@ -322,9 +351,9 @@ func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
 		return
 	}
 
-	_, err = os.Stat("./UserFiles/" + fileHeader.Filename)
+	_, err = os.Stat("./UserFiles/" + userLogin.Value + "/" + fileHeader.Filename)
 	if (os.IsNotExist(err)) {
-		err = ioutil.WriteFile("./UserFiles/" + fileHeader.Filename, content, os.ModePerm)
+		err = ioutil.WriteFile("./UserFiles/" + userLogin.Value + "/" + fileHeader.Filename, content, os.ModePerm)
 		if (err != nil) {
 			c.Error = errors.Wrap(err, "saving file on disk")
 			rw.WriteHeader(http.StatusInternalServerError)
@@ -341,14 +370,34 @@ func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
 	var mime = fileHeader.Header.Get("Content-Type")
 	var public = req.FormValue("isPublic")
 	_, err = db.Exec(`
-		INSERT INTO docs (name, mime, public) 
-		VALUES ($1, $2, $3);`, name, mime, public)
+		INSERT INTO docs (name, mime, public, author) 
+		VALUES ($1, $2, $3, $4);`, name, mime, public, userLogin.Value)
 	if (err != nil) {
-		c.Error = errors.Wrap(err, "inserting into db")
+		c.Error = errors.Wrap(err, "inserting into docs table")
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
+	var id string
+	err = db.QueryRow(`
+			SELECT id
+			FROM docs
+			WHERE name = $1 and author = $2;`, name, userLogin.Value).
+		Scan(&id)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "getting doc's id")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	_, err = db.Exec(`
+		INSERT INTO permits (docId, login) 
+		VALUES ($1, $2);`, id, userLogin.Value)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "inserting into permits table")
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	SetCacheIrrelevant()
 
 	reply := &ReplyModel{
@@ -363,53 +412,56 @@ func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
 }
 
 func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
+	var countOfDocs int
+
 	limit := req.URL.Query().Get("limit")
 
-	var countOfDocs int
-	var err error
+	userLogin, err := req.Cookie("login")
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing login")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+
 	if (limit != "") {
 		countOfDocs, err = strconv.Atoi(limit)
 		if err != nil{
 			countOfDocs = 0
 		}
 	}
+
 	if (cacheIsRelevant) {
-		docs := new(Docs)
-		if (countOfDocs == 0){
-			for _, value := range cache {
-				var doc = value
-				docs.DocsList = append(docs.DocsList, &doc)
+		userDocs := new(Docs)
+		for _, value := range cache{
+			var doc = value
+			if (doc.Public == true) {
+				userDocs.DocsList = append(userDocs.DocsList, &doc)
+				continue
 			}
-		} else {
-			var i = 0
-			for _, value := range cache {
-				var doc = value
-				docs.DocsList = append(docs.DocsList, &doc)
-				i++
-				if (i == countOfDocs) {
-					break
+
+			for _, user := range doc.Grant {
+				if (user == userLogin.Value) {
+					userDocs.DocsList = append(userDocs.DocsList, &doc)
 				}
 			}
 		}
-		reply := &ReplyModel{
-			Data: docs,
+
+		if (countOfDocs > 0 && countOfDocs < len(userDocs.DocsList)) {
+			userDocs.DocsList = userDocs.DocsList[:countOfDocs]
 		}
-		SetCacheRelevant()
+
+		reply := &ReplyModel{
+			Data: userDocs,
+		}
 		rw.WriteHeader(http.StatusOK)
 		c.Reply(rw, req, reply)
 	} else {
-		var result *sql.Rows
-		if (countOfDocs == 0){
-			result, err = db.Query(`
-				SELECT id, name, mime, public, created_at
-				FROM docs`)
-
-		} else {
-			result, err = db.Query(`
-				SELECT id, name, mime, public, created_at
-				FROM docs 
-				LIMIT $1`, countOfDocs)
-		}
+		result, err := db.Query(`
+				SELECT id, name, mime, public, created_at, author, login
+				FROM docs
+				INNER JOIN permits ON docs.id = permits.docid
+				ORDER BY id;`)
 
 		if (err != nil){
 			SetCacheIrrelevant()
@@ -420,18 +472,49 @@ func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
 		defer result.Close()
 
 		docs := new(Docs)
+		docPrev := new(Doc)
+		docNew := new(Doc)
+		var login string
 		for result.Next(){
-			doc := new(Doc)
-			err = result.Scan(&doc.Id, &doc.Name, &doc.Mime, &doc.Public, &doc.Created)
+			docPrev = docNew
+			docNew = new(Doc)
+			err = result.Scan(&docNew.Id, &docNew.Name, &docNew.Mime, &docNew.Public, &docNew.Created, &docNew.Author, &login)
 			if (err != nil){
 				SetCacheIrrelevant()
 				c.Error = errors.Wrap(err, "scanning result")
 				rw.WriteHeader(http.StatusInternalServerError)
 				return
 			}
-			docs.DocsList = append(docs.DocsList, doc)
 
-			WriteToCache(doc.Id, *doc)
+			if (docNew.Id == docPrev.Id || docPrev.Id == "") {
+				docNew.Grant = append(docPrev.Grant, login)
+				continue
+			}
+
+			if (docNew.Id != docPrev.Id) {
+				docs.DocsList = append(docs.DocsList, docPrev)
+				WriteToCache(docPrev.Id, *docPrev)
+				if (docNew.Public == true) {
+					docs.DocsList = append(docs.DocsList, docNew)
+					WriteToCache(docNew.Id, *docNew)
+					continue
+				}
+				docNew.Grant = append(docNew.Grant, login)
+				continue
+			}
+
+			if (docNew.Public == true) {
+				docs.DocsList = append(docs.DocsList, docNew)
+				WriteToCache(docNew.Id, *docNew)
+				continue
+			}
+
+
+		}
+
+		if (docNew.Id == docPrev.Id) {
+			docs.DocsList = append(docs.DocsList, docNew)
+			WriteToCache(docNew.Id, *docNew)
 		}
 
 		if err = result.Err(); err != nil {
@@ -441,10 +524,28 @@ func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
 			return
 		}
 
+		userDocs := new(Docs)
+		for _, doc := range docs.DocsList{
+			if (doc.Public == true) {
+				userDocs.DocsList = append(userDocs.DocsList, doc)
+				continue
+			}
+
+			for _, user := range doc.Grant {
+				if (user == userLogin.Value) {
+					userDocs.DocsList = append(userDocs.DocsList, doc)
+				}
+			}
+		}
+
+		if (countOfDocs > 0 && countOfDocs < len(userDocs.DocsList)) {
+			userDocs.DocsList = userDocs.DocsList[:countOfDocs]
+		}
+
 		SetCacheRelevant()
 
 		reply := &ReplyModel{
-			Data: docs,
+			Data: userDocs,
 		}
 
 		rw.WriteHeader(http.StatusOK)
@@ -453,28 +554,71 @@ func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
 }
 
 func (c *Context) GetDocByIdRoute(rw web.ResponseWriter, req *web.Request){
+	userLogin, err := req.Cookie("login")
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing login")
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
 	var docId = req.PathParams["id"]
 
 	doc, ok := cache[docId]
 	if ok {
-		rw.Header().Set("Content-Type", doc.Mime)
-		http.ServeFile(rw, req.Request, "./UserFiles/" + doc.Name)
-	} else {
-		doc := new(Doc)
-		err := db.QueryRow("SELECT id, name, mime, public, created_at FROM docs WHERE id=$1", docId).
-			Scan(&doc.Id, &doc.Name, &doc.Mime, &doc.Public, &doc.Created)
+		if (doc.Public == true) {
+			rw.Header().Set("Content-Type", doc.Mime)
+			http.ServeFile(rw, req.Request, "./UserFiles/" + doc.Author + "/" + doc.Name)
+			return
+		} else {
+			for _, user := range doc.Grant {
+				if (user == userLogin.Value) {
+					rw.Header().Set("Content-Type", doc.Mime)
+					http.ServeFile(rw, req.Request, "./UserFiles/" + doc.Author + "/" + doc.Name)
+					return
+				}
+			}
+			err = errors.New("this file is not for user " + userLogin.Value)
+			c.Error = errors.Wrap(err, "accessing forbidden file")
+			rw.WriteHeader(http.StatusForbidden)
+			return
+		}
 
+	} else {
+		var login string
+
+		result, err := db.Query(`SELECT id, name, mime, public, created_at, author, login 
+				FROM docs 
+				INNER JOIN permits ON docs.id = permits.docid
+				WHERE id=$1`, docId)
 		if (err != nil){
+			if (err == sql.ErrNoRows) {
+				c.Error = errors.Wrap(err, "trying to access file with bad id")
+				rw.WriteHeader(http.StatusNotFound)
+				return
+			}
 			c.Error = errors.Wrap(err, "querying file")
 			rw.WriteHeader(http.StatusNotFound)
 			return
 		}
+		defer result.Close()
 
-		WriteToCache(doc.Id, *doc)
+		doc := new(Doc)
+		for result.Next(){
+			err = result.Scan(&doc.Id, &doc.Name, &doc.Mime, &doc.Public, &doc.Created, &doc.Author, &login)
+			if (doc.Public == true || login == userLogin.Value) {
+				WriteToCache(doc.Id, *doc)
+				SetCacheIrrelevant()
 
-		rw.Header().Set("Content-Type", doc.Mime)
-		http.ServeFile(rw, req.Request, "./UserFiles/" + doc.Name)
+				rw.Header().Set("Content-Type", doc.Mime)
+				http.ServeFile(rw, req.Request, "./UserFiles/" + doc.Author + "/" + doc.Name)
+				return
+			}
+		}
 	}
+	err = errors.New("file not found")
+	c.Error = errors.Wrap(err, "searching for file")
+	rw.WriteHeader(http.StatusNotFound)
+	return
 }
 
 func (c *Context) PostRegisterRoute(rw web.ResponseWriter, req *web.Request){
@@ -499,6 +643,13 @@ func (c *Context) PostRegisterRoute(rw web.ResponseWriter, req *web.Request){
 	if (err != nil) {
 		c.Error = errors.Wrap(err, "registering with bad password")
 		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = os.MkdirAll("./UserFiles/" + regForm.Login + "/", os.ModePerm)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "creating user directory")
+		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -564,11 +715,13 @@ func (c *Context) PostAuthRoute(rw web.ResponseWriter, req *web.Request){
 
 	reply := &ReplyModel{
 		Res: &Response{
+			Login: authForm.Login,
 			Token: tokenRaw.String(),
 		},
 	}
 
 	http.SetCookie(rw, &http.Cookie{Name: "token", Value: tokenRaw.String(), Path: "/"})
+	http.SetCookie(rw, &http.Cookie{Name: "login", Value: authForm.Login, Path: "/"})
 	rw.Header().Set("Location", "/docs")
 	rw.WriteHeader(http.StatusOK)
 	c.Reply(rw, req, reply)
