@@ -62,12 +62,14 @@ type Context struct {
 	Error	error
 }
 
+//Custom middleware logger
 func (c *Context) Log(rw web.ResponseWriter, req *web.Request, next web.NextMiddlewareFunc){
 	start := time.Now()
 	next(rw, req)
 	glog.Infof("[%s] [%s %s]", time.Since(start), req.Method, req.URL)
 }
 
+//Custom middleware error handler
 func (c *Context) HandleError(rw web.ResponseWriter, req *web.Request, next web.NextMiddlewareFunc){
 	next(rw, req)
 
@@ -118,6 +120,7 @@ func (c *Context) HandleError(rw web.ResponseWriter, req *web.Request, next web.
 	}
 }
 
+//Universal replying method
 func (c *Context) Reply(rw web.ResponseWriter, req *web.Request, model *ReplyModel){
 	reply, err := json.MarshalIndent(model, "	", "	")
 	if (err != nil) {
@@ -128,6 +131,7 @@ func (c *Context) Reply(rw web.ResponseWriter, req *web.Request, model *ReplyMod
 	rw.Write(reply)
 }
 
+//Authentication checking middleware
 func (c *Context) AuthCheck(rw web.ResponseWriter, req *web.Request, next web.NextMiddlewareFunc){
 	var lastActivityTime time.Time
 	var login string
@@ -228,6 +232,7 @@ func ReadFromCache(key string) (Doc, error){
 	return data, nil
 }
 
+//Validates new user's login and password
 func VerifyRegisterParameters(parameter string, isPswd bool) (error){
 	var err		error
 	var i		int
@@ -281,6 +286,7 @@ func VerifyRegisterParameters(parameter string, isPswd bool) (error){
 	return nil
 }
 
+//Clears tokens associated with innactive users
 func ClearSessions() (error) {
 	_, err := db.Exec(`DELETE FROM sessions WHERE lastactivitytime < current_timestamp - interval '1 hour';`)
 	if (err != nil) {
@@ -302,6 +308,7 @@ func main() {
 	}
 	defer db.Close()
 
+	//Initiate sessions cleaning every 30 minutes
 	ticker := time.NewTicker(30 * time.Minute)
 	go func() {
 		for _ = range ticker.C {
@@ -316,6 +323,7 @@ func main() {
 	router := web.New(Context{}).
 		Middleware((*Context).Log).
 		Middleware((*Context).HandleError)
+	//API definition goes here
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("api/docs", (*Context).GetDocsRoute)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("api/docs/:id", (*Context).GetDocByIdRoute)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("api/docs", (*Context).PostDocRoute)
@@ -329,35 +337,43 @@ func main() {
 	router.Post("api/register", (*Context).PostRegisterRoute)
 	router.Post("api/auth", (*Context).PostAuthRoute)
 
+	//Pages definition goes here
 	router.Get("/", (*Context).RootRoute)
 	router.Get("/registration", (*Context).RegistrationPage)
 	router.Get("/login", (*Context).LoginPage)
 	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/docs", (*Context).DocsPage)
 
-	http.ListenAndServe("localhost:8000", router)
 	glog.Infof("Server started at port 8000")
+	http.ListenAndServe("localhost:8000", router)
 }
 
+//Pages controllers goes here
+//GET /
 func (c *Context) RootRoute(rw web.ResponseWriter, req *web.Request){
 	http.Redirect(rw, req.Request, "/docs", http.StatusFound)
 }
 
+//GET /registration
 func (c *Context) RegistrationPage(rw web.ResponseWriter, req *web.Request){
 	rw.Header().Set("Content-Type", "text/html")
 	http.ServeFile(rw, req.Request, "./public/registration.html")
 }
 
+//GET /login
 func (c *Context) LoginPage(rw web.ResponseWriter, req *web.Request){
 	rw.Header().Set("Content-Type", "text/html")
 	http.ServeFile(rw, req.Request, "./public/login.html")
 }
 
+//GET /docs
 func (c *Context) DocsPage(rw web.ResponseWriter, req *web.Request){
 	rw.Header().Set("Content-Type", "text/html")
 	http.ServeFile(rw, req.Request, "./public/docs.html")
 }
 
 
+//API controllers goes here
+//POST /api/docs
 func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
 	userLogin, err := req.Cookie("login")
 	if (err != nil) {
@@ -448,6 +464,7 @@ func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
 	c.Reply(rw, req, reply)
 }
 
+//GET /api/docs
 func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
 	var countOfDocs int
 
@@ -603,6 +620,7 @@ func (c *Context) GetDocsRoute(rw web.ResponseWriter, req *web.Request){
 	}
 }
 
+//GET /api/docs/:id
 func (c *Context) GetDocByIdRoute(rw web.ResponseWriter, req *web.Request){
 	userLogin, err := req.Cookie("login")
 	if (err != nil) {
@@ -671,6 +689,7 @@ func (c *Context) GetDocByIdRoute(rw web.ResponseWriter, req *web.Request){
 	return
 }
 
+//DELETE /api/docs/:id
 func (c *Context) DeleteDocRoute(rw web.ResponseWriter, req *web.Request){
 	userLogin, err := req.Cookie("login")
 	if (err != nil) {
@@ -736,6 +755,8 @@ func (c *Context) DeleteDocRoute(rw web.ResponseWriter, req *web.Request){
 	}
 
 }
+
+//POST /api/register
 func (c *Context) PostRegisterRoute(rw web.ResponseWriter, req *web.Request){
 	var regForm	RegisterForm
 
@@ -786,6 +807,7 @@ func (c *Context) PostRegisterRoute(rw web.ResponseWriter, req *web.Request){
 	c.Reply(rw, req, reply)
 }
 
+//POST /api/auth
 func (c *Context) PostAuthRoute(rw web.ResponseWriter, req *web.Request){
 	var authForm	RegisterForm
 	var login	string
@@ -842,6 +864,7 @@ func (c *Context) PostAuthRoute(rw web.ResponseWriter, req *web.Request){
 	c.Reply(rw, req, reply)
 }
 
+//DELETE /api/auth
 func (c *Context) DeleteAuthRoute(rw web.ResponseWriter, req *web.Request){
 	token, err := req.Cookie("token")
 	if (err != nil) {
@@ -878,6 +901,7 @@ func (c *Context) DeleteAuthRoute(rw web.ResponseWriter, req *web.Request){
 	c.Reply(rw, req, reply)
 }
 
+//POST /api/grant
 func (c *Context) GrantPermissionsRoute(rw web.ResponseWriter, req *web.Request){
 	var author string
 
@@ -931,6 +955,7 @@ func (c *Context) GrantPermissionsRoute(rw web.ResponseWriter, req *web.Request)
 	c.Reply(rw, req, reply)
 }
 
+//DELETE /api/grant
 func (c *Context) CancelPermissionsRoute(rw web.ResponseWriter, req *web.Request){
 	var author string
 
@@ -984,6 +1009,7 @@ func (c *Context) CancelPermissionsRoute(rw web.ResponseWriter, req *web.Request
 	c.Reply(rw, req, reply)
 }
 
+//POST /api/grant/public/:id
 func (c *Context) SetDocPublic(rw web.ResponseWriter, req *web.Request){
 	var author string
 
@@ -1037,6 +1063,7 @@ func (c *Context) SetDocPublic(rw web.ResponseWriter, req *web.Request){
 
 }
 
+//POST /api/grant/private/:id
 func (c *Context) SetDocPrivate(rw web.ResponseWriter, req *web.Request){
 	var author string
 
@@ -1090,6 +1117,7 @@ func (c *Context) SetDocPrivate(rw web.ResponseWriter, req *web.Request){
 
 }
 
+//GET /api/users
 func (c *Context) GetUsersListRoute(rw web.ResponseWriter, req *web.Request){
 	userLogin, err := req.Cookie("login")
 	if (err != nil) {
