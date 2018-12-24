@@ -3,6 +3,8 @@
 	<head>
 		<meta charset="utf-8">
         <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+        <script src='js/utils/cookie.js'></script>
+        <script src='js/docs.js'></script>
 	</head>
 
 	<body>
@@ -21,6 +23,33 @@
             </tr>
         </table>
         <br/>
+        <hr/>
+
+        <form action="/api/docs" id="file-form" enctype="multipart/form-data">
+            <span>File</span>
+            <input type="file" id="file" name="newdoc" size="10"/>
+            <label>
+              <input type="checkbox" value="false" checked="true" name="isPublic" id="isPublic" onclick='handleCheckboxClick(this);'>
+              Set public
+            </label>
+            <input type="button" id="file-button" value="Upload" />
+        </form>
+
+        <br/>
+        <br/>
+        <div style="display: flex; flexDirection: row; overflow: hidden; white-space: nowrap;">
+            <p>Delete file </p>
+            <select id="delete-file">
+              <option selected="">choose file</option>
+            </select>
+            <input type="button" value="DELETE" id="grant" onclick="handleDeleteClick()"/>
+        </div>
+        
+        <br/>
+        <br/>
+        <hr/>
+        <br/>
+
         <div style="display: flex; flexDirection: row; overflow: hidden; white-space: nowrap;">
             <p>Grant rights for file </p>
             <select id="grant-file">
@@ -67,169 +96,5 @@
 
             <input type="button" value="PRIVATE" id="private" onclick="handlePrivateClick()"/>
         </div>
-
-        <script>
-            $(function() {
-                $( document ).ready(function() {
-                    login = getCookie("login")
-                    var users;
-
-                    $.ajax({
-                        url: "/api/users",
-                        type: 'GET',
-                        dataType: "json",
-                        success: function(resp){
-                            users = resp.response.users;
-                            for(i = 0; i < users.length; i++){
-                                $("#grant-user").append("<option value=\"" + users[i] + "\">" + users[i] + "</option>");
-                            }
-                        }
-                    });
-
-                    $.ajax({
-                        url: "/api/docs",
-                        type: 'GET',
-                        dataType: "json",
-                        success: function(resp){
-                            var docs = resp.data.docs;
-                            var index;
-                            var author;
-                            var grant;
-                            for(i = 0; i < docs.length; i++){
-                                if (login === docs[i].author) {
-                                    author = "You"
-                                    $("#grant-file").append("<option value=\"" + docs[i].id + "\">" + docs[i].name+ "</option>");
-                                    if (docs[i].grant !== null){
-                                        if (docs[i].grant.length > 1) {
-                                           $("#cancelperm-file").append("<option value=\"" + docs[i].id + "\">" + docs[i].name+ "</option>"); 
-                                            for(j = 0; j < docs[i].grant.length; j++){
-                                                for(k = 0; k < users.length; k++){
-                                                    if(docs[i].grant[j] === users[k]){
-                                                        $("#cancelperm-user").append("<option value=\"" + users[k] + "\">" + users[k]+ "</option>"); 
-                                                        continue
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                } else {
-                                    author = docs[i].author
-                                }
-                                if (docs[i].grant === null) {
-                                    grant = "Only You"
-                                } else {
-                                    grant = docs[i].grant
-                                }
-
-                                if (docs[i].public === true) {
-                                    $("#private-file").append("<option value=\"" + docs[i].id + "\">" + docs[i].name+ "</option>");
-                                } else {
-                                    $("#public-file").append("<option value=\"" + docs[i].id + "\">" + docs[i].name+ "</option>");
-                                }
-
-                                $("#docs-table").append("<tr><td>" + "<a href=\"/api/docs/"+docs[i].id+"\">"+docs[i].name+"</a>" + "</td>" +
-                                    "<td>" + docs[i].public + "</td>" + 
-                                    "<td>" + docs[i].created + "</td>" +
-                                    "<td>" + author + "</td>" +
-                                    "<td>" + grant + "</td>" +"</tr>");
-                            }
-                        }
-                    });
-
-                    
-                });
-            });
-        </script>
-        <script>
-            function handleGrantClick(){
-                var selectFile = document.getElementById("grant-file");
-                var fileId = selectFile.options[selectFile.selectedIndex].value;
-
-                var selectUser = document.getElementById("grant-user");
-                var user = selectUser.options[selectUser.selectedIndex].value;
-                $.ajax({
-                    url: "/api/grant?login="+user+"&docid="+fileId,
-                    type: 'POST',
-                    dataType: "json",
-                    success: function(){
-                        location.reload();
-                    }
-                });
-            };
-        </script>
-        <script>
-            function handleCancelClick(){
-                var selectFile = document.getElementById("cancelperm-file");
-                var fileId = selectFile.options[selectFile.selectedIndex].value;
-
-                var selectUser = document.getElementById("cancelperm-user");
-                var user = selectUser.options[selectUser.selectedIndex].value;
-                $.ajax({
-                    url: "/api/grant?login="+user+"&docid="+fileId,
-                    type: 'DELETE',
-                    dataType: "json",
-                    success: function(){
-                        location.reload();
-                    }
-                });
-            };
-        </script>
-        <script>
-            function handlePublicClick(){
-                var selectFile = document.getElementById("public-file");
-                var fileId = selectFile.options[selectFile.selectedIndex].value;
-                $.ajax({
-                    url: "/api/grant/public/"+fileId,
-                    type: 'POST',
-                    dataType: "json",
-                    success: function(){
-                        location.reload();
-                    }
-                });
-            };
-        </script>
-        <script>
-            function handlePrivateClick(){
-                var selectFile = document.getElementById("private-file");
-                var fileId = selectFile.options[selectFile.selectedIndex].value;
-                $.ajax({
-                    url: "/api/grant/private/"+fileId,
-                    type: 'POST',
-                    dataType: "json",
-                    success: function(){
-                        location.reload();
-                    }
-                });
-            };
-        </script>
-        <script>
-            function handleLogoutClick(){
-                $.ajax({
-                    url: "/api/auth/",
-                    type: 'DELETE',
-                    success: function(){
-                        location.reload();
-                    }
-                });
-            };
-        </script>
-        <script>
-            function getCookie(cname) {
-              var name = cname + "=";
-              var decodedCookie = decodeURIComponent(document.cookie);
-              var ca = decodedCookie.split(';');
-              for(var i = 0; i <ca.length; i++) {
-                var c = ca[i];
-                while (c.charAt(0) == ' ') {
-                  c = c.substring(1);
-                }
-                if (c.indexOf(name) == 0) {
-                  return c.substring(name.length, c.length);
-                }
-              }
-              return "";
-            }
-        </script>
 	</body>
 </html>
