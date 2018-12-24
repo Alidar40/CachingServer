@@ -136,11 +136,11 @@ func (c *Context) AuthCheck(rw web.ResponseWriter, req *web.Request, next web.Ne
 	if (err != nil) {
 		if (err == http.ErrNoCookie){
 			c.Error = errors.Wrap(err, "signing in without cookie")
-			rw.WriteHeader(http.StatusUnauthorized)
+			HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
 			return
 		}
 		c.Error = errors.Wrap(err, "parsing token")
-		rw.WriteHeader(http.StatusUnauthorized)
+		HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
 		return
 	}
 
@@ -148,11 +148,11 @@ func (c *Context) AuthCheck(rw web.ResponseWriter, req *web.Request, next web.Ne
 	if (err != nil) {
 		if (err == sql.ErrNoRows){
 			c.Error = errors.Wrap(err, "trying to sign in with bad token")
-			rw.WriteHeader(http.StatusUnauthorized)
+			HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
 			return
 		}
 		c.Error = errors.Wrap(err, "searching for appropriate token in db")
-		rw.WriteHeader(http.StatusUnauthorized)
+		HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
 		return
 	}
 
@@ -160,29 +160,37 @@ func (c *Context) AuthCheck(rw web.ResponseWriter, req *web.Request, next web.Ne
 	if (err != nil) {
 		if (err == http.ErrNoCookie){
 			c.Error = errors.Wrap(err, "signing in without login")
-			rw.WriteHeader(http.StatusUnauthorized)
+			HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
 			return
 		}
 		c.Error = errors.Wrap(err, "parsing ligin")
-		rw.WriteHeader(http.StatusUnauthorized)
+		HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
 		return
 	}
 
 	if (loginFromCookie.Value != login) {
 		err = errors.New("bad login")
 		c.Error = errors.Wrap(err, "signing in with bad login")
-		rw.WriteHeader(http.StatusUnauthorized)
+		HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
 		return
 	}
 
 	_, err = db.Exec(`UPDATE sessions SET lastactivitytime = now() where token = $1;`, token.Value)
 	if (err != nil) {
 		c.Error = errors.Wrap(err, "updating session token")
-		rw.WriteHeader(http.StatusInternalServerError)
+		HandleBadAuthResponse(rw, req, http.StatusInternalServerError)
 		return
 	}
 
 	next(rw, req)
+}
+
+func HandleBadAuthResponse(rw web.ResponseWriter, req *web.Request, status int){
+	if (req.RequestURI == "/docs") {
+		http.Redirect(rw, req.Request, "/login", http.StatusFound)
+	} else {
+		rw.WriteHeader(status)
+	}
 }
 
 var(
@@ -308,25 +316,47 @@ func main() {
 	router := web.New(Context{}).
 		Middleware((*Context).Log).
 		Middleware((*Context).HandleError)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("api/docs", (*Context).GetDocsRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("api/docs/:id", (*Context).GetDocByIdRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("api/docs", (*Context).PostDocRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("api/docs/:id", (*Context).DeleteDocRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("api/auth", (*Context).DeleteAuthRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("api/grant", (*Context).GrantPermissionsRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("api/grant", (*Context).CancelPermissionsRoute)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("api/grant/public/:id", (*Context).SetDocPublic)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("api/grant/private/:id", (*Context).SetDocPrivate)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("api/users", (*Context).GetUsersListRoute)
+	router.Post("api/register", (*Context).PostRegisterRoute)
+	router.Post("api/auth", (*Context).PostAuthRoute)
+
 	router.Get("/", (*Context).RootRoute)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/docs", (*Context).GetDocsRoute)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/docs/:id", (*Context).GetDocByIdRoute)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/docs", (*Context).PostDocRoute)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/docs/:id", (*Context).DeleteDocRoute)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/auth", (*Context).DeleteAuthRoute)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/grant", (*Context).GrantPermissionsRoute)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Delete("/grant", (*Context).CancelPermissionsRoute)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/grant/public/:id", (*Context).SetDocPublic)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Post("/grant/private/:id", (*Context).SetDocPrivate)
-	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/users", (*Context).GetUsersListRoute)
-	router.Post("/register", (*Context).PostRegisterRoute)
-	router.Post("/auth", (*Context).PostAuthRoute)
+	router.Get("/registration", (*Context).RegistrationPage)
+	router.Get("/login", (*Context).LoginPage)
+	router.Subrouter(Context{}, "/").Middleware((*Context).AuthCheck).Get("/docs", (*Context).DocsPage)
+
 	http.ListenAndServe("localhost:8000", router)
+	glog.Infof("Server started at port 8000")
 }
 
 func (c *Context) RootRoute(rw web.ResponseWriter, req *web.Request){
-	fmt.Fprint(rw, "Hi there")
+	http.Redirect(rw, req.Request, "/docs", http.StatusFound)
 }
+
+func (c *Context) RegistrationPage(rw web.ResponseWriter, req *web.Request){
+	rw.Header().Set("Content-Type", "text/html")
+	http.ServeFile(rw, req.Request, "./public/registration.html")
+}
+
+func (c *Context) LoginPage(rw web.ResponseWriter, req *web.Request){
+	rw.Header().Set("Content-Type", "text/html")
+	http.ServeFile(rw, req.Request, "./public/login.html")
+}
+
+func (c *Context) DocsPage(rw web.ResponseWriter, req *web.Request){
+	rw.Header().Set("Content-Type", "text/html")
+	http.ServeFile(rw, req.Request, "./public/docs.html")
+}
+
 
 func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
 	userLogin, err := req.Cookie("login")
@@ -844,7 +874,6 @@ func (c *Context) DeleteAuthRoute(rw web.ResponseWriter, req *web.Request){
 	}
 
 	http.SetCookie(rw, &http.Cookie{Name: "token", Value: "", Path: "/"})
-	rw.Header().Set("Location", "auth/")
 	rw.WriteHeader(http.StatusOK)
 	c.Reply(rw, req, reply)
 }

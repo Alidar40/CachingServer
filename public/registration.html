@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8">
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+	</head>
+
+	<body>
+		<p>Registration</p>
+        <p id="error"></p>
+		<hr>
+		<div>
+			<form action="/api/register" method="post">
+				<label>Login</label><br>
+				<input type="text" name="login" id="login" required minlength="8" maxlength="30"/><br><br>
+
+				<label>Password</label><br>
+				<input type="password" name="pswd" id="pswd" required minlength="8" maxlength="30"/><br><br>
+
+				<!--<input type="submit" value="Register">-->
+                <button type="submit" name="submit">Register</button>
+			</form>
+		</div>
+        <script>
+           $("form").submit(function(e) {
+                e.preventDefault();
+                var $form = $( this ), url = $form.attr( 'action' );
+                var login = $('#login').val();
+                var pswd = $('#pswd').val();
+                var posting = $.post( url, "{ \"login\": \"" + login + "\", \"pswd\": \"" + pswd + "\"}" );
+                posting.done(function( data ) {
+                    window.location = "login";
+                });
+                posting.fail(function(data) {
+                    $("#error").empty();
+                    $("#error").append("<p style=\"color: red; width: 70%\">"+ data.responseText + "</p>");
+                });
+            });
+        </script>
+	</body>
+</html>
