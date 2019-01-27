@@ -1,7 +1,6 @@
 package main
 
 import(
-	"fmt"
 	"net/http"
 	"strconv"
 	"database/sql"
@@ -13,6 +12,9 @@ import(
 	"os"
 	"time"
 	"flag"
+	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/gocraft/web"
 	_ "github.com/lib/pq"
@@ -122,7 +124,7 @@ func (c *Context) HandleError(rw web.ResponseWriter, req *web.Request, next web.
 
 //Universal replying method
 func (c *Context) Reply(rw web.ResponseWriter, req *web.Request, model *ReplyModel){
-	reply, err := json.MarshalIndent(model, "	", "	")
+	reply, err := json.MarshalIndent(model, "", " ")
 	if (err != nil) {
 		c.Error = err
 		return
@@ -148,18 +150,6 @@ func (c *Context) AuthCheck(rw web.ResponseWriter, req *web.Request, next web.Ne
 		return
 	}
 
-	err = db.QueryRow(`SELECT lastactivitytime, login FROM sessions WHERE token = $1;`, token.Value).Scan(&lastActivityTime, &login)
-	if (err != nil) {
-		if (err == sql.ErrNoRows){
-			c.Error = errors.Wrap(err, "trying to sign in with bad token")
-			HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
-			return
-		}
-		c.Error = errors.Wrap(err, "searching for appropriate token in db")
-		HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
-		return
-	}
-
 	loginFromCookie, err := req.Cookie("login")
 	if (err != nil) {
 		if (err == http.ErrNoCookie){
@@ -172,12 +162,25 @@ func (c *Context) AuthCheck(rw web.ResponseWriter, req *web.Request, next web.Ne
 		return
 	}
 
+	err = db.QueryRow(`SELECT lastactivitytime, login FROM sessions WHERE token = $1;`, token.Value).Scan(&lastActivityTime, &login)
+	if (err != nil) {
+		if (err == sql.ErrNoRows){
+			c.Error = errors.Wrap(err, "trying to sign in with bad token")
+			HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
+			return
+		}
+		c.Error = errors.Wrap(err, "searching for appropriate token in db")
+		HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
+		return
+	}
+
 	if (loginFromCookie.Value != login) {
 		err = errors.New("bad login")
 		c.Error = errors.Wrap(err, "signing in with bad login")
 		HandleBadAuthResponse(rw, req, http.StatusUnauthorized)
 		return
 	}
+
 
 	_, err = db.Exec(`UPDATE sessions SET lastactivitytime = now() where token = $1;`, token.Value)
 	if (err != nil) {
@@ -201,7 +204,7 @@ var(
 	db	*sql.DB
 	cache = make(map[string]Doc)
 	cacheIsRelevant = false
-	mutex	sync.Mutex
+	mutex	sync.RWMutex
 )
 
 func SetCacheRelevant(){
@@ -222,68 +225,13 @@ func WriteToCache(key string, value Doc){
 }
 
 func ReadFromCache(key string) (Doc, error){
-	mutex.Lock()
+	mutex.RLock()
 	data, ok := cache[key]
+	mutex.RUnlock()
 	if (ok == false){
-		mutex.Unlock()
 		return data, errors.New("no such a value in cache")
 	}
-	mutex.Unlock()
 	return data, nil
-}
-
-//Validates new user's login and password
-func VerifyRegisterParameters(parameter string, isPswd bool) (error){
-	var err		error
-	var i		int
-	var isLetter	bool
-	var isDigit	bool
-
-	var containsDigit	bool
-	var containsLetter	bool
-
-
-	if (len(parameter) < 8 || len(parameter) > 32){
-		err = errors.New("parameter is either too short, or too long")
-		return err
-	}
-
-	for i = 0; i < len(parameter); i++ {
-		isLetter = false
-		isDigit = false
-
-		symbol, err := strconv.Atoi(fmt.Sprintf("%d", parameter[i]))
-		if (err != nil) {
-			return err
-		}
-
-		/*ASCII:-------A---------------Z-----------------a---------------z*/
-		if ((symbol >= 65 && symbol <= 90) || (symbol >= 97 && symbol <= 122)) {
-			isLetter = true
-			if (isPswd) {
-				containsLetter = true
-			}
-		}
-
-		/*ASCII:------0---------------9*/
-		if (symbol >= 48 && symbol <= 57) {
-			isDigit = true
-			if (isPswd) {
-				containsDigit = true
-			}
-		}
-
-		if (isDigit == false && isLetter == false) {
-			err = errors.New("one of characters is niether a letter, nor a digit")
-			return err
-		}
-	}
-
-	if (isPswd == true && (containsLetter == false || containsDigit == false)){
-		err = errors.New("password must contain at least one digit and one letter")
-		return err
-	}
-	return nil
 }
 
 //Clears tokens associated with innactive users
@@ -300,9 +248,17 @@ func main() {
 	flag.Set("v", "2")
 	flag.Parse()
 
-	var err error
-	db, err = sql.Open("postgres", "postgres://alidar:1@localhost/cachingserverdb");
-	if (err != nil){
+	//var err error
+
+	db_login, err := ioutil.ReadFile("./db_login.txt") //db_login.txt: "username:password"
+	if (err != nil) {
+		glog.Infof("[ERROR] in main(!) while openning db_login.txt: %s", err)
+	}
+
+	connectionString := "postgres://" + strings.TrimRight(string(db_login), "\r\n") + "@localhost/cachingserverdb"
+
+	db, err = sql.Open("postgres", connectionString);
+	if (err != nil) {
 		glog.Infof("[ERROR] in main(!) while opening db: %s", err)
 		return
 	}
@@ -382,7 +338,7 @@ func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
 		return
 	}
 
-	err = req.ParseMultipartForm(16777216) //16 MiB
+	err = req.ParseMultipartForm(16 << 20) //16 MiB
 	if (err != nil) {
 		c.Error = errors.Wrap(err, "parsing form")
 		rw.WriteHeader(http.StatusBadRequest)
@@ -404,9 +360,17 @@ func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
 		return
 	}
 
-	_, err = os.Stat("./UserFiles/" + userLogin.Value + "/" + fileHeader.Filename)
+	savePath := filepath.Join("./UserFiles/" + userLogin.Value + "/" + fileHeader.Filename)
+	_, err = filepath.Rel(filepath.Join("UserFiles/" + userLogin.Value), savePath)
+	if (err != nil) {
+		c.Error = errors.Wrap(err, "parsing filename")
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	_, err = os.Stat(savePath)
 	if (os.IsNotExist(err)) {
-		err = ioutil.WriteFile("./UserFiles/" + userLogin.Value + "/" + fileHeader.Filename, content, os.ModePerm)
+		err = ioutil.WriteFile(savePath, content, os.ModePerm)
 		if (err != nil) {
 			c.Error = errors.Wrap(err, "saving file on disk")
 			rw.WriteHeader(http.StatusInternalServerError)
@@ -422,23 +386,13 @@ func (c *Context) PostDocRoute(rw web.ResponseWriter, req *web.Request){
 	var name = fileHeader.Filename
 	var mime = fileHeader.Header.Get("Content-Type")
 	var public = req.FormValue("isPublic")
-	_, err = db.Exec(`
-		INSERT INTO docs (name, mime, public, author) 
-		VALUES ($1, $2, $3, $4);`, name, mime, public, userLogin.Value)
-	if (err != nil) {
-		c.Error = errors.Wrap(err, "inserting into docs table")
-		rw.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
 	var id string
 	err = db.QueryRow(`
-			SELECT id
-			FROM docs
-			WHERE name = $1 and author = $2;`, name, userLogin.Value).
-		Scan(&id)
+		INSERT INTO docs (name, mime, public, author) 
+		VALUES ($1, $2, $3, $4)
+		RETURNING id;`, name, mime, public, userLogin.Value).Scan(&id)
 	if (err != nil) {
-		c.Error = errors.Wrap(err, "getting doc's id")
+		c.Error = errors.Wrap(err, "inserting into docs table")
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -629,19 +583,21 @@ func (c *Context) GetDocByIdRoute(rw web.ResponseWriter, req *web.Request){
 		return
 	}
 
+	var docPath string
 	var docId = req.PathParams["id"]
 
 	doc, ok := cache[docId]
 	if ok {
+		docPath = filepath.Join("./UserFiles/" + doc.Author + "/" + doc.Name)
 		if (doc.Public == true) {
 			rw.Header().Set("Content-Type", doc.Mime)
-			http.ServeFile(rw, req.Request, "./UserFiles/" + doc.Author + "/" + doc.Name)
+			http.ServeFile(rw, req.Request, docPath)
 			return
 		} else {
 			for _, user := range doc.Grant {
 				if (user == userLogin.Value) {
 					rw.Header().Set("Content-Type", doc.Mime)
-					http.ServeFile(rw, req.Request, "./UserFiles/" + doc.Author + "/" + doc.Name)
+					http.ServeFile(rw, req.Request, docPath)
 					return
 				}
 			}
@@ -677,8 +633,9 @@ func (c *Context) GetDocByIdRoute(rw web.ResponseWriter, req *web.Request){
 				WriteToCache(doc.Id, *doc)
 				SetCacheIrrelevant()
 
+				docPath = filepath.Join("./UserFiles/" + doc.Author + "/" + doc.Name)
 				rw.Header().Set("Content-Type", doc.Mime)
-				http.ServeFile(rw, req.Request, "./UserFiles/" + doc.Author + "/" + doc.Name)
+				http.ServeFile(rw, req.Request, docPath)
 				return
 			}
 		}
@@ -700,10 +657,12 @@ func (c *Context) DeleteDocRoute(rw web.ResponseWriter, req *web.Request){
 
 	docId := req.PathParams["id"]
 
+	mutex.RLock()
 	_, ok := cache[docId]
 	if (ok) {
 		delete(cache, docId)
 	}
+	mutex.RUnlock()
 
 	var doc = new(Doc)
 	err = db.QueryRow(`
@@ -732,15 +691,16 @@ func (c *Context) DeleteDocRoute(rw web.ResponseWriter, req *web.Request){
 			return
 		}
 
-		_, err = os.Stat("./UserFiles/" + userLogin.Value + "/" + doc.Name)
+		docPath := filepath.Join("./UserFiles" + userLogin.Value + "/" + doc.Name)
+		_, err = os.Stat(docPath)
 		if (os.IsNotExist(err)) {
 			err = errors.New("there is no such a file")
 			c.Error = errors.Wrap(err, "trying to delete file, which doesn't exist")
 			rw.WriteHeader(http.StatusBadRequest)
 		} else {
-			err = os.Remove("./UserFiles/" + userLogin.Value + "/" + doc.Name)
+			err = os.Remove(docPath)
 			if (err != nil) {
-				c.Error = errors.Wrap(err, "deleting file ./UserFiles/" + userLogin.Value + "/" + doc.Name)
+				c.Error = errors.Wrap(err, "deleting file " + docPath)
 				rw.WriteHeader(http.StatusInternalServerError)
 				return
 			}
@@ -768,21 +728,23 @@ func (c *Context) PostRegisterRoute(rw web.ResponseWriter, req *web.Request){
 		return
 	}
 
-	err = VerifyRegisterParameters(regForm.Login, false)
-	if (err != nil) {
+	rege := regexp.MustCompile("^(.\\d?)(.\\D?)([a-zA-Z0-9_]{6,20})$")
+	authCheck := rege.MatchString(regForm.Login)
+	if (!authCheck) {
 		c.Error = errors.Wrap(err, "registering with bad login")
 		rw.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	err = VerifyRegisterParameters(regForm.Password, true)
-	if (err != nil) {
+	authCheck = rege.MatchString(regForm.Password)
+	if (!authCheck) {
 		c.Error = errors.Wrap(err, "registering with bad password")
 		rw.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	err = os.MkdirAll("./UserFiles/" + regForm.Login + "/", os.ModePerm)
+	dirPath := filepath.Join("./UserFiles/" + regForm.Login + "/")
+	err = os.MkdirAll(dirPath, os.ModePerm)
 	if (err != nil) {
 		c.Error = errors.Wrap(err, "creating user directory")
 		rw.WriteHeader(http.StatusInternalServerError)

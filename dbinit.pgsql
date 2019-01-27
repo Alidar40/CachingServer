@@ -12,7 +12,7 @@ COMMENT ON EXTENSION "uuid-ossp" IS 'generate universally unique identifiers (UU
 
 -- *****TABLE DOCS***** --
 CREATE TABLE public.docs (
-    name text,
+    name text NOT NULL,
     mime text,
     public boolean,
     created_at timestamp without time zone DEFAULT now(),
